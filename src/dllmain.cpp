@@ -24,6 +24,7 @@
 #include "stereo_audio.hpp"
 #include "texture_buffer_size.hpp"
 #include "water_reflections.hpp"
+#include "mgs3_hud_fixes.hpp"
 
 //Warnings
 #include "asi_loader_checks.hpp"
@@ -38,7 +39,9 @@
 #include "color_filters.hpp"
 #include "distance_culling.hpp"
 #include "gamma_correction.hpp"
+#include "imgui_overlay.hpp"
 #include "mg1_custom_loading_screens.hpp"
+#include "mgs3_hud_fixes.hpp"
 
 
 // Aspect ratio + HUD stuff
@@ -1096,6 +1099,7 @@ void afterPresent()
     bInitialized = true;
     spdlog::info("afterPresent() started");
     g_VectorScalingFix.LoadCompiledShader();
+    g_ImGuiOverlay.Initialize(g_D3D11Hooks.swapChain.Get());
     g_MuteWarning.CheckStatus();
     g_SteamAPI.OnSteamInputLoaded();
 
@@ -1144,6 +1148,7 @@ static void InitializeSubsystems()
     INITIALIZE(DamagedSaveFix::Initialize());
     INITIALIZE(g_FixAimAfterEquip.Initialize());
     INITIALIZE(g_FixAimingFullTilt.Initialize());
+    INITIALIZE(g_MGS3HudFixes.Initialize());
     //INITIALIZE(g_ColorFilterFix.Initialize());
 
         //Warnings

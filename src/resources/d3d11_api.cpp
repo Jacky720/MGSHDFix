@@ -4,64 +4,144 @@
 #include "gpu_check.hpp"
 #include "line_scaling.hpp"
 #include "logging.hpp"
+#include "input_handler.hpp"
+#include "imgui_overlay.hpp"
 
 #pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
-
-#include <dxgi.h>
-#include "gamma_correction.hpp"
-#include "input_handler.hpp"
 
 void afterPresent();
 
 namespace
 {
-    // Hooks
-    SafetyHookInline CreateDXGIFactory_hook {};
-    SafetyHookInline CreateSwapChain_hook {};
-    SafetyHookInline PresentHook {};
-    SafetyHookInline ResizeBuffersHook {};
-    SafetyHookInline CreateTexture2DHook {};
+    // Global hooks (function-impl level, not per-instance vtable)
+    SafetyHookInline PresentHookGlobal {};
+    SafetyHookInline ResizeBuffersHookGlobal {};
 
-    using PresentFn = HRESULT(__stdcall*)(IDXGISwapChain*, UINT, UINT);
-    PresentFn oPresent = nullptr;
+    // We latch the first real swapchain we see
+    std::atomic<IDXGISwapChain*> g_FirstSeenSwapchain { nullptr };
 
-    using ResizeBuffersFn = HRESULT(__stdcall*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
-    ResizeBuffersFn oResizeBuffers = nullptr;
-    /*
-    using CreateTexture2DFn = HRESULT(__stdcall*)(
-        ID3D11Device*,
-        const D3D11_TEXTURE2D_DESC*,
-        const D3D11_SUBRESOURCE_DATA*,
-        ID3D11Texture2D**);
-
-    HRESULT __stdcall HookedCreateTexture2D(
-        ID3D11Device* device,
-        const D3D11_TEXTURE2D_DESC* pDesc,
-        const D3D11_SUBRESOURCE_DATA* pInitialData,
-        ID3D11Texture2D** ppTexture2D)
+    // Utility: create an invisible tiny window for dummy swapchain bootstrap
+    static HWND CreateHiddenWindow()
     {
-        return CreateTexture2DHook.stdcall<HRESULT>(device, pDesc, pInitialData, ppTexture2D);
+        static const wchar_t* kCls = L"MGSHDFix_DummyDX11Wnd";
+        static std::once_flag regOnce;
+        std::call_once(regOnce, []
+            {
+                WNDCLASSEXW wc {};
+                wc.cbSize = sizeof(wc);
+                wc.style = CS_HREDRAW | CS_VREDRAW;
+                wc.lpfnWndProc = DefWindowProcW;
+                wc.hInstance = GetModuleHandleW(nullptr);
+                wc.hCursor = LoadCursorW(nullptr, IDC_NO);
+                wc.lpszClassName = kCls;
+                RegisterClassExW(&wc);
+            });
+
+        return CreateWindowExW(
+            0, kCls, L"", WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT, CW_USEDEFAULT, 16, 16,
+            nullptr, nullptr, GetModuleHandleW(nullptr), nullptr
+        );
     }
 
-    void HookDevice(ID3D11Device* device)
+    static void OneTimeGpuLog(IDXGISwapChain* swap)
     {
-        if (!device || CreateTexture2DHook)
+        static std::atomic_bool done { false };
+        if (done || !swap)
+        {
             return;
+        }
 
-        void** vtable = *reinterpret_cast<void***>(device);
-        CreateTexture2DHook = safetyhook::create_inline(
-            vtable[5],
-            reinterpret_cast<void*>(HookedCreateTexture2D)
-        );
+        IDXGIDevice* dxgiDevice = nullptr;
+        if (SUCCEEDED(swap->GetDevice(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice))) && dxgiDevice)
+        {
+            IDXGIAdapter* adapter = nullptr;
+            if (SUCCEEDED(dxgiDevice->GetAdapter(&adapter)) && adapter)
+            {
+                // Assign into ComPtr on g_D3D11Hooks. This AddRefs.
+                g_D3D11Hooks.dxgiAdapter = adapter;
 
-        LOG_HOOK(CreateTexture2DHook, "CreateTexture2D");
-    }*/
+                DXGI_ADAPTER_DESC desc {};
+                if (SUCCEEDED(adapter->GetDesc(&desc)))
+                {
+                    const std::string gpuName = Util::WideToUTF8(desc.Description);
 
-    void RefreshDeviceAndContext(IDXGISwapChain* swap)
+                    LARGE_INTEGER driverVersion {};
+                    if (SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &driverVersion)))
+                    {
+                        const UINT product = HIWORD(driverVersion.HighPart);
+                        const UINT version = LOWORD(driverVersion.HighPart);
+                        const UINT subVersion = HIWORD(driverVersion.LowPart);
+                        const UINT build = LOWORD(driverVersion.LowPart);
+
+                        CheckMinimumGPU(gpuName, product, version, subVersion, build);
+                    }
+                    else
+                    {
+                        spdlog::warn("DXGI: Could not query GPU driver version.");
+                        spdlog::info("DXGI: GPU {}", gpuName);
+                    }
+                }
+
+                adapter->Release(); // ComPtr keeps its own ref now
+            }
+
+            dxgiDevice->Release();
+        }
+
+        done = true;
+    }
+
+    // Enumerate a top-level window for this process as fallback
+    struct EnumCtx
     {
+        DWORD pid;
+        HWND* out;
+    };
+
+    static BOOL CALLBACK EnumTopLevelProc(HWND hwnd, LPARAM lParam)
+    {
+        auto* ctx = reinterpret_cast<EnumCtx*>(lParam);
+        DWORD wpid = 0;
+        GetWindowThreadProcessId(hwnd, &wpid);
+        if (wpid == ctx->pid && IsWindowVisible(hwnd))
+        {
+            const LONG ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+            if ((ex & WS_EX_TOOLWINDOW) == 0)
+            {
+                *ctx->out = hwnd;
+                return FALSE; // stop, found one
+            }
+        }
+        return TRUE; // keep going
+    }
+
+    static HWND GetSwapchainHWND(IDXGISwapChain* sc)
+    {
+        if (!sc)
+        {
+            return nullptr;
+        }
+
+        DXGI_SWAP_CHAIN_DESC desc {};
+        if (SUCCEEDED(sc->GetDesc(&desc)) && desc.OutputWindow)
+        {
+            return desc.OutputWindow;
+        }
+
+        HWND found = nullptr;
+        EnumCtx ctx { GetCurrentProcessId(), &found };
+        EnumWindows(EnumTopLevelProc, reinterpret_cast<LPARAM>(&ctx));
+        return found;
+    }
+
+    static void CaptureFirstSwapchainAndInit(IDXGISwapChain* sc)
+    {
+        g_D3D11Hooks.swapChain = sc;
+
+        // Device/context
         ComPtr<ID3D11Device> device;
-        if (SUCCEEDED(swap->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(device.GetAddressOf()))) && device)
+        if (SUCCEEDED(sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(device.GetAddressOf()))) && device)
         {
             g_D3D11Hooks.d3dDevice = device;
 
@@ -70,158 +150,173 @@ namespace
             if (context)
             {
                 g_D3D11Hooks.d3dDeviceContext = context;
-                spdlog::info("D3D11 Device and Context refreshed successfully.");
-
-                //HookDevice(device.Get());
-            }
-            else
-            {
-                spdlog::error("Failed to get ID3D11DeviceContext from ID3D11Device.");
             }
         }
         else
         {
-            spdlog::error("Failed to get ID3D11Device from IDXGISwapChain.");
+            spdlog::warn("DXGI: First swapchain has no ID3D11Device.");
         }
+
+        // HWND for ImGui Win32 backend
+        HWND hwnd = GetSwapchainHWND(sc);
+        g_D3D11Hooks.MainHwnd = hwnd;
+        spdlog::info("DXGI: Captured HWND = {}", fmt::ptr(hwnd));
+
+        OneTimeGpuLog(sc);
+
+        // Initialize overlay/backend now that HWND and device/context are set
+        afterPresent();
     }
 
-
-
-    HRESULT __stdcall HookedPresent(IDXGISwapChain* pSwapChain, UINT syncInterval, UINT flags)
+    // Detours (global)
+    static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* pSwapChain, UINT syncInterval, UINT flags)
     {
-        static bool firstInit = false;
-
-        if (!firstInit)
+        if (pSwapChain)
         {
-            firstInit = true;
-
-            g_D3D11Hooks.swapChain = pSwapChain;
-            RefreshDeviceAndContext(pSwapChain);
-
-            // ==== GPU logging + driver version check ====
-            IDXGIDevice* dxgiDevice = nullptr;
-            if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice))) && dxgiDevice)
+            IDXGISwapChain* expected = nullptr;
+            if (g_FirstSeenSwapchain.compare_exchange_strong(expected, pSwapChain))
             {
-                IDXGIAdapter* adapter = nullptr;
-                if (SUCCEEDED(dxgiDevice->GetAdapter(&adapter)) && adapter)
-                {
-                    g_D3D11Hooks.dxgiAdapter = adapter;
-
-                    DXGI_ADAPTER_DESC desc;
-                    if (SUCCEEDED(adapter->GetDesc(&desc)))
-                    {
-                        std::string gpuName = Util::WideToUTF8(desc.Description);
-
-                        LARGE_INTEGER driverVersion = {};
-                        if (SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &driverVersion)))
-                        {
-                            UINT product = HIWORD(driverVersion.HighPart);
-                            UINT version = LOWORD(driverVersion.HighPart);
-                            UINT subVersion = HIWORD(driverVersion.LowPart);
-                            UINT build = LOWORD(driverVersion.LowPart);
-
-                            CheckMinimumGPU(gpuName, product, version, subVersion, build);
-                        }
-                        else
-                        {
-                            spdlog::warn("Could not query GPU driver version.");
-                            spdlog::info("Running on GPU: {}", gpuName);
-                        }
-                    }
-                }
-                dxgiDevice->Release();
-            }
-            afterPresent();
-        }
-
-        {
-            ComPtr<ID3D11Device> deviceFromSwap;
-            if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(deviceFromSwap.GetAddressOf()))))
-            {
-                static ComPtr<ID3D11Device> lastDevice;
-                if (deviceFromSwap.Get() != lastDevice.Get())
-                {
-                    lastDevice = deviceFromSwap;
-                    RefreshDeviceAndContext(pSwapChain);
-                }
+                CaptureFirstSwapchainAndInit(pSwapChain);
             }
 
+            g_ImGuiOverlay.OnPresent(pSwapChain);
+            g_InputHandler.Update();
         }
 
-        g_InputHandler.Update();
-        return PresentHook.call<HRESULT>(pSwapChain, syncInterval, flags);
+        return PresentHookGlobal.stdcall<HRESULT>(pSwapChain, syncInterval, flags);
     }
 
-
-    HRESULT __stdcall HookedResizeBuffers(
-        IDXGISwapChain* pSwapChain,
-        UINT BufferCount,
-        UINT Width,
-        UINT Height,
-        DXGI_FORMAT NewFormat,
-        UINT SwapChainFlags)
+    static HRESULT STDMETHODCALLTYPE HookedResizeBuffers(IDXGISwapChain* swap, UINT Count, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT Flags)
     {
-        RefreshDeviceAndContext(pSwapChain);
-        return ResizeBuffersHook.call<HRESULT>(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+        // Do overlay side first so it can release resources before the real resize
+        g_ImGuiOverlay.OnResize();
+        return ResizeBuffersHookGlobal.stdcall<HRESULT>(swap, Count, Width, Height, NewFormat, Flags);
     }
 
-    void HookSwapChainPresent(IDXGISwapChain* swapChain)
+    // Bootstrap: create a dummy device/swapchain, read impl addresses, and hook them
+    static bool InstallGlobalSwapchainHooksViaDummy()
     {
-        if (!swapChain || oPresent)
-            return;
-
-        void** vtable = *reinterpret_cast<void***>(swapChain);
-        oPresent = reinterpret_cast<PresentFn>(vtable[8]);
-
-        PresentHook = safetyhook::create_inline(vtable[8], reinterpret_cast<void*>(HookedPresent));
-        LOG_HOOK(PresentHook, "PresentHook");
-
-        oResizeBuffers = reinterpret_cast<ResizeBuffersFn>(vtable[13]);
-        ResizeBuffersHook = safetyhook::create_inline(vtable[13], reinterpret_cast<void*>(HookedResizeBuffers));
-        LOG_HOOK(ResizeBuffersHook, "ResizeBuffersHook");
-    }
-
-    HRESULT __stdcall HookedCreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI_SWAP_CHAIN_DESC* pDesc, IDXGISwapChain** ppSwapChain)
-    {
-        HRESULT result = CreateSwapChain_hook.stdcall<HRESULT>(pFactory, pDevice, pDesc, ppSwapChain);
-        if (SUCCEEDED(result) && ppSwapChain && *ppSwapChain)
+        if (!GetModuleHandleW(L"dxgi.dll") || !GetModuleHandleW(L"d3d11.dll"))
         {
-            g_D3D11Hooks.swapChain = *ppSwapChain;
-            RefreshDeviceAndContext(*ppSwapChain);
-            HookSwapChainPresent(*ppSwapChain);
-        }
-        else
-        {
-            spdlog::error("IDXGIFactory::CreateSwapChain failed. HRESULT: 0x{:08X}", result);
+            spdlog::warn("DXGI/D3D11 not loaded yet; skipping dummy hookup.");
+            return false;
         }
 
-        return result;
-    }
-
-    HRESULT WINAPI CreateDXGIFactory_hooked(REFIID riid, _COM_Outptr_ void** ppFactory)
-    {
-        HRESULT result = CreateDXGIFactory_hook.stdcall<HRESULT>(riid, ppFactory);
-
-        if (SUCCEEDED(result))
+        HWND hwnd = CreateHiddenWindow();
+        if (!hwnd)
         {
-            g_D3D11Hooks.dxgiFactory = static_cast<IDXGIFactory*>(*ppFactory);
-            void** vtable = *reinterpret_cast<void***>(g_D3D11Hooks.dxgiFactory.Get());
-            CreateSwapChain_hook = safetyhook::create_inline(vtable[10], reinterpret_cast<void*>(HookedCreateSwapChain));
-            LOG_HOOK(CreateSwapChain_hook, "CreateSwapChain.");
-        }
-        else
-        {
-            spdlog::error("CreateDXGIFactory failed. HRESULT: 0x{:08X}", result);
+            spdlog::error("Failed to create dummy window for DXGI bootstrap.");
+            return false;
         }
 
-        return result;
+        DXGI_SWAP_CHAIN_DESC scd {};
+        scd.BufferCount = 2;
+        scd.BufferDesc.Width = 16;
+        scd.BufferDesc.Height = 16;
+        scd.BufferDesc.RefreshRate.Numerator = 60;
+        scd.BufferDesc.RefreshRate.Denominator = 1;
+        scd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        scd.OutputWindow = hwnd;
+        scd.SampleDesc.Count = 1;
+        scd.SampleDesc.Quality = 0;
+        scd.Windowed = TRUE;
+        scd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        scd.Flags = 0;
+
+        UINT createFlags = 0;
+        // createFlags |= D3D11_CREATE_DEVICE_DEBUG;
+
+        constexpr D3D_FEATURE_LEVEL kFeatureLevels[] =
+        {
+            D3D_FEATURE_LEVEL_11_1,
+            D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1,
+            D3D_FEATURE_LEVEL_10_0
+        };
+
+        ComPtr<ID3D11Device>        dev;
+        ComPtr<ID3D11DeviceContext> ctx;
+        ComPtr<IDXGISwapChain>      sc;
+
+        D3D_FEATURE_LEVEL obtained {};
+        const HRESULT hr = D3D11CreateDeviceAndSwapChain(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createFlags,
+            kFeatureLevels, _countof(kFeatureLevels), D3D11_SDK_VERSION,
+            &scd, sc.GetAddressOf(), dev.GetAddressOf(), &obtained, ctx.GetAddressOf()
+        );
+
+        if (FAILED(hr) || !sc)
+        {
+            DestroyWindow(hwnd);
+            spdlog::error("Dummy D3D11CreateDeviceAndSwapChain failed. hr=0x{:08X}",
+                static_cast<unsigned int>(hr));
+            return false;
+        }
+
+        // Extract implementation addresses
+        void** vt = *reinterpret_cast<void***>(sc.Get());
+        if (!vt)
+        {
+            sc.Reset(); ctx.Reset(); dev.Reset();
+            DestroyWindow(hwnd);
+            spdlog::error("Dummy swapchain has null vtable.");
+            return false;
+        }
+
+        constexpr size_t kPresentIndex = 8;   // IDXGISwapChain::Present
+        constexpr size_t kResizeBuffersIndex = 13;  // IDXGISwapChain::ResizeBuffers
+
+        void* presentAddr = vt[kPresentIndex];
+        void* resizeBuffersAddr = vt[kResizeBuffersIndex];
+
+        spdlog::info("Global swapchain impls: Present={} ResizeBuffers={}",
+            fmt::ptr(presentAddr), fmt::ptr(resizeBuffersAddr));
+
+        bool ok = true;
+
+        if (presentAddr && !PresentHookGlobal)
+        {
+            PresentHookGlobal = safetyhook::create_inline(presentAddr, reinterpret_cast<void*>(HookedPresent));
+            LOG_HOOK(PresentHookGlobal, "Global IDXGISwapChain::Present");
+        }
+        else if (!presentAddr)
+        {
+            spdlog::warn("Present implementation address missing.");
+            ok = false;
+        }
+
+        if (resizeBuffersAddr && !ResizeBuffersHookGlobal)
+        {
+            ResizeBuffersHookGlobal = safetyhook::create_inline(resizeBuffersAddr, reinterpret_cast<void*>(HookedResizeBuffers));
+            LOG_HOOK(ResizeBuffersHookGlobal, "Global IDXGISwapChain::ResizeBuffers");
+        }
+        else if (!resizeBuffersAddr)
+        {
+            spdlog::warn("ResizeBuffers implementation address missing.");
+            ok = false;
+        }
+
+        // Cleanup dummy
+        sc.Reset();
+        ctx.Reset();
+        dev.Reset();
+        DestroyWindow(hwnd);
+
+        return ok;
     }
 }
 
 void D3D11Hooks::Initialize()
 {
-    CreateDXGIFactory_hook = safetyhook::create_inline(CreateDXGIFactory, reinterpret_cast<void*>(CreateDXGIFactory_hooked));
-    LOG_HOOK(CreateDXGIFactory_hook, "CreateDXGIFactory");
+    if (InstallGlobalSwapchainHooksViaDummy())
+    {
+        spdlog::info("Global DXGI Present/Resize hooks installed via dummy swapchain.");
+    }
+    else
+    {
+        spdlog::warn("Global DXGI Present/Resize hooks not installed (dummy path failed).");
+    }
 }
 
 void D3D11Hooks::UnloadCompiler(const HMODULE d3dcompiler)
