@@ -318,12 +318,18 @@ namespace
 
 } // namespace
 
-void CheckMinimumGPU(const std::string& gpuName, UINT product, UINT version, UINT subVersion, UINT build)
+void CheckMinimumGPU(const std::string& gpuName, bool logDriver, UINT product, UINT version, UINT subVersion, UINT build)
 {
+    static bool alreadyWarned = false;
+    if (alreadyWarned)
+    {
+        return;
+    }
     std::string sanitizedName = SanitizeGPUName(gpuName);
     if (std::string_view(ToUpper(sanitizedName)).starts_with("LLVMPIPE"))
     {
         spdlog::info("Game is running on Proton Compatibility Layer: {}", sanitizedName);
+        alreadyWarned = true;
         return;
     }
 
@@ -345,9 +351,28 @@ void CheckMinimumGPU(const std::string& gpuName, UINT product, UINT version, UIN
         spdlog::warn("GPU WARNING: The game requires a minimum of a {} or equivalent.", MINIMUM_GPU_NAME);
         spdlog::warn("GPU WARNING: Degraded performance (ie \"Snake moving in slow motion\") and crashing likely to occur.");
         spdlog::warn("-------------------    GPU WARNING     ----------------------");
+        alreadyWarned = true;
         return;
     }
 
+
+    if (tier < kMinimumTier)
+    {
+        spdlog::warn("-------------------    GPU WARNING     ----------------------");
+        spdlog::warn("GPU WARNING: This GPU is below the minimum system requirements of a {} or equivalent.", MINIMUM_GPU_NAME);
+        int percent = tier * 100 / kMinimumTier;
+        spdlog::warn("GPU WARNING: Estimated performance compared to a {}: {}%", MINIMUM_GPU_NAME, percent);
+        spdlog::warn("GPU WARNING: Degraded performance (ie \"Snake moving in slow motion\") and crashing likely to occur.");
+        spdlog::warn("-------------------    GPU WARNING     ----------------------");
+        alreadyWarned = true;
+        return;
+    }
+
+    if (!logDriver)
+    {
+        return;
+    }
+    
     std::string driverVersion = fmt::format("{}.{}.{}.{}", product, version, subVersion, build);
 
     spdlog::info("Game is running on GPU: {} (Driver Version: {})", sanitizedName, driverVersion);
@@ -359,15 +384,8 @@ void CheckMinimumGPU(const std::string& gpuName, UINT product, UINT version, UIN
         spdlog::warn("GPU WARNING: Outdated drivers can cause performance and stability issues.");
         spdlog::warn("GPU WARNING: Please update to the latest driver version from the vendor's website.");
         spdlog::warn("-------------------    GPU WARNING     ----------------------");
+        alreadyWarned = true;
     }
 
-    if (tier < kMinimumTier)
-    {
-        spdlog::warn("-------------------    GPU WARNING     ----------------------");
-        spdlog::warn("GPU WARNING: This GPU is below the minimum system requirements of a {} or equivalent.", MINIMUM_GPU_NAME);
-        int percent = tier * 100 / kMinimumTier;
-        spdlog::warn("GPU WARNING: Estimated performance compared to a {}: {}%", MINIMUM_GPU_NAME, percent);
-        spdlog::warn("GPU WARNING: Degraded performance (ie \"Snake moving in slow motion\") and crashing likely to occur.");
-        spdlog::warn("-------------------    GPU WARNING     ----------------------");
-    }
+
 }

@@ -5,4 +5,4 @@
 ///
 /// Minimum GPU can be overridden by defining MINIMUM_GPU_NAME before including this header.
 /// Default: NVIDIA GeForce GTX 970
-void CheckMinimumGPU(const std::string& gpuName, UINT product, UINT version, UINT subVersion, UINT build);
+void CheckMinimumGPU(const std::string& gpuName, bool logDriver,  UINT product, UINT version, UINT subVersion, UINT build);

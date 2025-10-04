@@ -121,7 +121,7 @@ namespace
                             UINT subVersion = HIWORD(driverVersion.LowPart);
                             UINT build = LOWORD(driverVersion.LowPart);
 
-                            CheckMinimumGPU(gpuName, product, version, subVersion, build);
+                            CheckMinimumGPU(gpuName, true, product, version, subVersion, build);
                         }
                         else
                         {
@@ -184,6 +184,7 @@ namespace
 
     HRESULT __stdcall HookedCreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI_SWAP_CHAIN_DESC* pDesc, IDXGISwapChain** ppSwapChain)
     {
+
         HRESULT result = CreateSwapChain_hook.stdcall<HRESULT>(pFactory, pDevice, pDesc, ppSwapChain);
         if (SUCCEEDED(result) && ppSwapChain && *ppSwapChain)
         {

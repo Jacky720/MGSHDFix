@@ -2,6 +2,7 @@
 #include "common.hpp"
 #include "logging.hpp"
 
+#include "gpu_check.hpp"
 #include "spdlog/sinks/base_sink.h"
 
 #include "steamworks_api.hpp"
@@ -188,14 +189,14 @@ void Logging::LogSysInfo()
 
     spdlog::info("System Details - CPU: {}", cpu);
 
+    int gpuIndex = 0;
+    std::string deviceString;
     if (Util::IsSteamOS())
     {
         spdlog::info("System Details - Detected Steam Deck (SteamOS / Proton).");
     }
     else
     {
-        std::string deviceString;
-        int gpuIndex = 1;
         for (int i = 0; ; i++)
         {
             DISPLAY_DEVICE dd = { sizeof(dd), 0 };
@@ -204,6 +205,7 @@ void Logging::LogSysInfo()
             {
                 break; //that's all, folks.
             }
+            gpuIndex++;
             char deviceStringBuffer[128];
             WideCharToMultiByte(CP_UTF8, 0, dd.DeviceString, -1, deviceStringBuffer, sizeof(deviceStringBuffer), NULL, NULL);
             if (deviceString == deviceStringBuffer) //each monitor reports what gpu is driving it, lets just double check in case we're looking at a laptop with mixed usage.
@@ -212,8 +214,11 @@ void Logging::LogSysInfo()
             }
             deviceString = deviceStringBuffer;
             spdlog::info("System Details - GPU #{}: {}", gpuIndex, deviceString);
-            gpuIndex++;
         }
+    }
+    if (gpuIndex == 1) //only one gpu found
+    {
+        CheckMinimumGPU(deviceString, false, 0, 0, 0, 0);
     }
 
 
