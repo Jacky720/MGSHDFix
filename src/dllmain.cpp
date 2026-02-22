@@ -136,6 +136,8 @@ void NHT_COsContext_SetControllerID_Hook(int controllerType)
     NHT_COsContext_SetControllerID(iLauncherConfigCtrlType);
 }
 
+static bool forcedLauncherShutdown = false;
+
 static void Init_LauncherConfigOverride()
 {
     // If we know games steam appid, try creating steam_appid.txt file, so that game EXE can be launched directly in future runs
@@ -222,8 +224,8 @@ static void Init_LauncherConfigOverride()
                     CloseHandle(processInfo.hThread);
 
                     // Force launcher to exit
+                    forcedLauncherShutdown = true;
                     spdlog::shutdown();
-                    ExitProcess(0);
                     ExitProcess(EXIT_SUCCESS);
                 }
                 else
@@ -241,8 +243,8 @@ static void Init_LauncherConfigOverride()
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
                 spdlog::info("MG/MG2 | MGS 2 | MGS 3: Companion game exited, exiting launcher.");
+                forcedLauncherShutdown = true;
                 spdlog::shutdown();
-                ExitProcess(0);
                 ExitProcess(EXIT_SUCCESS);
             }
         }
@@ -266,8 +268,8 @@ static void Init_LauncherConfigOverride()
                     CloseHandle(processInfo.hThread);
 
                     // Force launcher to exit
+                    forcedLauncherShutdown = true;
                     spdlog::shutdown();
-                    ExitProcess(0);
                     ExitProcess(EXIT_SUCCESS);
                 }
                 spdlog::error("MG/MG2 | MGS 2 | MGS 3: Launcher Config: Failed to restart launcher with jumpstart.");
@@ -557,6 +559,10 @@ static void* __cdecl memset_Hook(void* Dst, int Val, size_t Size) // Our memset 
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
 {
+    if (forcedLauncherShutdown)
+    {
+        return TRUE;
+    }
     if (ul_reason_for_call == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(hModule);
