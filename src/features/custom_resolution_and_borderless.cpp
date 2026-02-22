@@ -22,11 +22,19 @@ namespace
     float fMGS2_EffectScaleX;
     float fMGS2_EffectScaleY;
 
-    static const char* kOrigWndProcProp = "CRB_OrigWndProc";
-    static const char* kInitFocusProp = "CRB_InitFocusDone";
+    const char* kOrigWndProcProp = "CRB_OrigWndProc";
+    const char* kInitFocusProp = "CRB_InitFocusDone";
 
-    static void EnsureInitialTopmostAndFocus(HWND hWnd)
+    void EnsureInitialTopmostAndFocus(HWND hWnd)
     {
+        if (g_Logging.bConsoleShown)
+        {
+            static bool bAlreadyWarned = false;
+            if (bAlreadyWarned) return;
+            bAlreadyWarned = true;
+            spdlog::warn("CreateWindowExA: Skipping EnsureInitialTopmostAndFocus because console is shown. This may cause focus issues. If you want to fix this, close the console and restart the game.");
+            return;
+        }
         if (hWnd == nullptr || GetPropA(hWnd, kInitFocusProp) != nullptr)
         {
             return;
@@ -60,7 +68,7 @@ namespace
         spdlog::info("CreateWindowExA: EnsureInitialTopmostAndFocus applied.");
     }
 
-    static LRESULT CALLBACK FocusTopmostWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    LRESULT CALLBACK FocusTopmostWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         if (msg == WM_SHOWWINDOW && wParam != 0)
         {
@@ -95,7 +103,7 @@ namespace
 
     SafetyHookInline CreateWindowExA_hook {};
 
-    static void SubclassAndKick(HWND hWnd)
+    void SubclassAndKick(HWND hWnd)
     {
         if (hWnd == nullptr)
         {
