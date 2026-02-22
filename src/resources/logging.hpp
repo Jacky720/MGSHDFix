@@ -6,12 +6,12 @@ class Logging final
 {
 private:
     static std::string GetSteamOSVersion();
-    bool bConsoleShown = false;
 public:
     static void ShowConsole();
     static void Initialize();
     static void LogSysInfo();
 
+    bool bConsoleShown = false;
     std::chrono::time_point<std::chrono::high_resolution_clock> initStartTime;
     bool bVerboseLogging = true;
 };

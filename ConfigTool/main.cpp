@@ -280,7 +280,7 @@ static int GetBannerResourceID()
 
 #pragma region CrashWarnings
     //These crash warnings are also in src\warnings\asi_loader_checks.cpp / ASILoaderCompatibility::Check(), make sure to keep them in sync.
-    if (std::filesystem::exists(exePath / "d3d11.dll") && (Helper::GetFileDescription((exePath / "d3d11.dll").string()) == Helper::GetFileDescription((exePath / "winhttp.dll").string())))
+    if (std::filesystem::exists(exePath / "d3d11.dll") && (Helper::GetFileDescription((exePath / "d3d11.dll").string()) == kAsiLoaderDescription))
     {
         wxLogError("DUPLICATE MOD LOADER ERROR: Multiple ASI Loader .dll installations detected! This can cause inconsistent bugs and crashes.\n"
             "\n"

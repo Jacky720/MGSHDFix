@@ -16,6 +16,8 @@
 /// This is automatically set by CI and should be left at 0.0.0.
 inline const std::string ASI_LOADER_VERSION_STRING = "0.0.0"; 
 
+inline constexpr const char* kAsiLoaderDescription = "Ultimate-ASI-Loader-x64";
+
 
 #define STRINGIFY_HELPER(x) #x
 #define STRINGIFY(x) STRINGIFY_HELPER(x)
