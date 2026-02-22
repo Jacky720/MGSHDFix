@@ -76,7 +76,7 @@ namespace
     // ==========================================================
     // LOAD/SAVE
     // ==========================================================
-    static ModWarningCache LoadCache(const std::filesystem::path& file)
+    ModWarningCache LoadCache(const std::filesystem::path& file)
     {
         ModWarningCache data;
 
@@ -143,7 +143,7 @@ namespace
         return data;
     }
 
-    static void SaveCache(const std::filesystem::path& file, const ModWarningCache& data)
+    void SaveCache(const std::filesystem::path& file, const ModWarningCache& data)
     {
         std::ofstream f(file, std::ios::binary | std::ios::trunc);
         if (!f)
@@ -186,7 +186,7 @@ namespace
     // ==========================================================
     // MESSAGE HELPERS
     // ==========================================================
-    static std::string BuildInitialPhaseTail(uint32_t remainingAfterThis, uint32_t cooldownDays)
+    std::string BuildInitialPhaseTail(uint32_t remainingAfterThis, uint32_t cooldownDays)
     {
         if (remainingAfterThis > 0)
         {
@@ -206,7 +206,7 @@ namespace
                                                                                             "Internal -> " + ConfigKeys::MissingBugfixModWarning_Setting;
     }
 
-    static std::string BuildCooldownTail(uint32_t cooldownDays)
+    std::string BuildCooldownTail(uint32_t cooldownDays)
     {
         return "----------------\n"
                 "\n"
@@ -219,7 +219,7 @@ namespace
     // ==========================================================
     // WARNING LOGIC
     // ==========================================================
-    static uint32_t GetWarningsRemaining(ModWarningCache& cache, const std::string& key, const WarningPolicy& policy)
+    uint32_t GetWarningsRemaining(ModWarningCache& cache, const std::string& key, const WarningPolicy& policy)
     {
         const auto it = cache.warn.find(key);
         if (it == cache.warn.end())
@@ -239,12 +239,12 @@ namespace
         return (e.lastShownUnix == 0 || now >= e.lastShownUnix + DaysToSeconds(policy.cooldownDays)) ? 1u : 0u;
     }
 
-    static bool ShouldWarn(ModWarningCache& cache, const std::string& key, const WarningPolicy& policy)
+    bool ShouldWarn(ModWarningCache& cache, const std::string& key, const WarningPolicy& policy)
     {
         return GetWarningsRemaining(cache, key, policy) > 0;
     }
 
-    static void RecordWarning(ModWarningCache& cache, const std::filesystem::path& file, const std::string& key, const WarningPolicy& policy)
+    void RecordWarning(ModWarningCache& cache, const std::filesystem::path& file, const std::string& key, const WarningPolicy& policy)
     {
         WarningEntry& e = cache.warn[key];
 
@@ -264,7 +264,7 @@ namespace
         SaveCache(file, cache);
     }
 
-    static void HardResetIfEnvironmentChanged(ModWarningCache& cache, const std::filesystem::path& file)
+    void HardResetIfEnvironmentChanged(ModWarningCache& cache, const std::filesystem::path& file)
     {
         const std::wstring curPath = std::filesystem::current_path().wstring();
         const std::wstring curDate = GetWindowsInstallDate();

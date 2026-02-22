@@ -32,7 +32,7 @@ namespace
 
     // Fill and bind GS constant buffer for the current viewport.
     // Needed to scale the radar, which is handled in a separate UI pass with its own smaller viewport.
-    inline void UpdateGSParamsCB(ID3D11DeviceContext* ctx, bool isUI)
+    void UpdateGSParamsCB(ID3D11DeviceContext* ctx, bool isUI)
     {
         if (!ctx || !gsParamsCB)
             return;

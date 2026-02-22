@@ -155,7 +155,7 @@ namespace
 
 #undef X
 
-    inline const Stage* FindStageByName(const char* currentStage)
+    const Stage* FindStageByName(const char* currentStage)
     {
         if (!currentStage)
             return nullptr;

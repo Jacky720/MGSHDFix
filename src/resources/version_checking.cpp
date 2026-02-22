@@ -217,9 +217,9 @@ bool LatestVersionChecker::checkForUpdates()
 namespace
 {
     // Prevent multiple dialogs per process lifetime
-    static bool g_ShownUpdateContactError = false;
+    bool g_ShownUpdateContactError = false;
 
-    static void ShowUpdateContactFailure(const std::vector<std::string>& providers)
+    void ShowUpdateContactFailure(const std::vector<std::string>& providers)
     {
         if (g_ShownUpdateContactError)
         {
