@@ -32,10 +32,75 @@ typedef struct {
 namespace {
 	FASTCALL_1IN1OUT BPOpenFile;
 	FASTCALL_1IN1OUT BPGetFileSize;
-	//FASTCALL_3IN1OUT BPReadFile;
+	FASTCALL_3IN1OUT BPReadFile;
 	FASTCALL_1IN1OUT BPCloseFile;
-	//FASTCALL_1IN1OUT BPIsReadDone;
+	FASTCALL_1IN1OUT BPIsReadDone;
+	SafetyHookInline OpenHook{};
+	SafetyHookInline FileSizeHook{};
+	SafetyHookInline ReadHook{};
+	SafetyHookInline ReadAsyncHook{};
+	SafetyHookInline CloseHook{};
+	SafetyHookInline FinishHook{};
 }
+
+// Synchronous file operation functions to substitute
+
+#define debug(...) do { if (g_Logging.bVerboseLogging) { spdlog::info("BP_FilesysChanges: " __VA_ARGS__); } } while (0)
+#define HOOK_BP_FILESYS
+//#define LOG_ONLY
+
+void* __fastcall HD_OpenFile(const char* path) {
+	debug("Opening {}", std::string(path));
+#ifdef LOG_ONLY
+	return OpenHook.call<void*>(path);
+#else
+	return fopen(path, "rb");
+#endif
+}
+
+void __fastcall HD_CloseFile(void* const fp) {
+	debug("Closing {}", (long)fp);
+#ifdef LOG_ONLY
+	CloseHook.call<void>(fp);
+#else
+	fclose((FILE*)fp);
+#endif
+}
+
+long __fastcall HD_GetFileSize(void* const fp) {
+#ifdef LOG_ONLY
+	long sz = FileSizeHook.call<long>(fp);
+#else
+	size_t oldpos = ftell((FILE*)fp);
+	fseek((FILE*)fp, 0, SEEK_END);
+	long sz = ftell((FILE*)fp);
+	fseek((FILE*)fp, oldpos, SEEK_SET);
+#endif
+	debug("size of {} is {}", (long)fp, sz);
+	return sz;
+}
+
+// Used for both ReadFile and ReadFileAsync, only difference is ReadFile technically should discard rax (return type void)
+void* __fastcall HD_ReadFile(void* const fp, void* const buf, const size_t sz) {
+	debug("reading {} bytes from {} into {}", sz, (long)fp, (long)buf);
+#ifdef LOG_ONLY
+	return ReadHook.call<void*>(fp, buf, sz);
+#else
+	fread(buf, sz, 1, (FILE*)fp);
+	return fp;
+#endif
+}
+
+// "Is operation complete?" Yes, obviously; it was done synchronously with fread.
+int __fastcall HD_TryFinishFileOp() {
+	debug("file op is synchronous");
+#ifdef LOG_ONLY
+	return FinishHook.call<int>();
+#else
+	return 1;
+#endif
+}
+
 
 // Helper for optimized file buffer allocation
 static inline size_t RoundUp(size_t size) {
@@ -118,7 +183,7 @@ static std::filesystem::path OverloadMirror(const std::filesystem::path& directo
 
 static inline void* LoadSimilarFiles(BPLoadFileState* state, bool isBPAssets) {
 #define match_substr (isBPAssets ? "bp_assets_" : "manifest_")
-
+	debug("Now searching for other {} files", match_substr);
 	// Find files similar to the currently used path.
 	const char* filePath = isBPAssets ? state->bpAssetsPath : state->manifestPath;
 	std::filesystem::path directory = std::filesystem::path(filePath).parent_path();
@@ -219,6 +284,7 @@ static inline void* LoadSimilarFiles(BPLoadFileState* state, bool isBPAssets) {
 	return state->currentFileHandle;
 }
 
+
 void BP_FilesysChanges::Initialize() {
 
 	if (!(eGameType & MGS2)) // TODO: MGS3 support, likely requires different patterns
@@ -228,10 +294,10 @@ void BP_FilesysChanges::Initialize() {
 
 	if (Util::IsSteamOS()) // temporary. linux filesystems are stupid and shit reliant on expand_bp_assets can randomly cause crashing.
 	{
-        spdlog::warn("BP_FilesysChanges: Temporarily disabled on SteamOS due to crashing issues with Linux filesystems.");
-        spdlog::warn("BP_FilesysChanges: Features reliant on expand_bp_assets will not be available.");
-        spdlog::warn("BP_FilesysChanges: This includes: Snake Holster Fix, Hostage Arm Fix, Shell 1 Core Camera Screen fix, Alternative Colonel MSX Sprite.");
-		return;
+        spdlog::warn("BP_FilesysChanges: Unstable on SteamOS due to crashing issues with Linux filesystems.");
+        //spdlog::warn("BP_FilesysChanges: Features reliant on expand_bp_assets will not be available.");
+        //spdlog::warn("BP_FilesysChanges: This includes: Snake Holster Fix, Hostage Arm Fix, Shell 1 Core Camera Screen fix, Alternative Colonel MSX Sprite.");
+		//return;
 	}
 
 	bLoaded = true;
@@ -248,11 +314,11 @@ void BP_FilesysChanges::Initialize() {
 		return;
 	}
 
-	//BPIsReadDone = (FASTCALL_1IN1OUT)Memory::GetRelativeOffset(BPAssetsLoader + 0x57);
+	BPIsReadDone = (FASTCALL_1IN1OUT)Memory::GetRelativeOffset(BPAssetsLoader + 0x57);
 	BPCloseFile = (FASTCALL_1IN1OUT)Memory::GetRelativeOffset(BPAssetsLoader + 0x67);
 	BPOpenFile = (FASTCALL_1IN1OUT)Memory::GetRelativeOffset(BPAssetsLoader + 0x91);
 	BPGetFileSize = (FASTCALL_1IN1OUT)Memory::GetRelativeOffset(BPAssetsLoader + 0xa6);
-	//BPReadFile = (FASTCALL_3IN1OUT)Memory::GetRelativeOffset(BPAssetsLoader + 0x10f);
+	BPReadFile = (FASTCALL_3IN1OUT)Memory::GetRelativeOffset(BPAssetsLoader + 0x10f);
 
 
 	// Both these injections are immediately after the file is read in; we can close the handle and open new ones as needed.
@@ -272,4 +338,34 @@ void BP_FilesysChanges::Initialize() {
 			ctx.rax = (uintptr_t)LoadSimilarFiles((BPLoadFileState*)ctx.rdi, true);
 		});
 	}
+
+	// Various hooks in bp/shared/BP_FileSupport.h (and whichever CPP file the Master Collection builds it with)
+	// to use standard synchronous functions for file management (should fix realloc() above on Linux)
+#ifdef HOOK_BP_FILESYS
+	{
+		// BP_OpenFile
+		// 48 89 5c 24 08 48 89 74 24 10 57 48 83 ec 50 48 8b 1d //?? ?? ?? ?? 48 8b f1 48 85 db
+		OpenHook = safetyhook::create_inline(reinterpret_cast<void*>(BPOpenFile), reinterpret_cast<void*>(HD_OpenFile));
+		// BP_CloseFile
+		// 48 89 5c 24 08 57 48 83 ec 20 48 8b 1d ?? ?? ?? ?? 48 8b f9 48 85
+		CloseHook = safetyhook::create_inline(reinterpret_cast<void*>(BPCloseFile), reinterpret_cast<void*>(HD_CloseFile));
+		// BP_GetFileSize
+		// 40 53 48 83 ec 20 48 8b d9 e8 ?? ?? ?? ?? 48 83 7b 08 00
+		FileSizeHook = safetyhook::create_inline(reinterpret_cast<void*>(BPGetFileSize), reinterpret_cast<void*>(HD_GetFileSize));
+		// BP_ReadFile
+		// 48 89 5c 24 08 48 89 6c 24 10 48 89 74 24 18 57 48 83 ec 20 48 8b 1d ?? ?? ?? ?? 49 8b f0 48 8b ea ...
+		ReadHook = safetyhook::create_inline(reinterpret_cast<void*>(BPReadFile), reinterpret_cast<void*>(HD_ReadFile));
+		// BP_ReadFileAsync is very nearly byte-for-byte the same as ReadFile, so do ReadFile first... then pattern match
+		// Also, it's the same synchronous solution as ReadFile.
+		// 48 89 5c 24 08 48 89 6c 24 10 48 89 74 24 18 57 48 83 ec 20 48 8b 1d ?? ?? ?? ?? 49 8b f0 48 8b ea ...
+		uint8_t* BPReadAsync = Memory::PatternScan(baseModule, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B 1D ?? ?? ?? ?? 49 8B F0 48 8B EA", "BP_ReadFileAsync");
+		if (!BPReadAsync) {
+			spdlog::error("Failed to match BP_ReadFileAsync, may cause issues.");
+		}
+		ReadAsyncHook = safetyhook::create_inline(reinterpret_cast<void*>(BPReadAsync), reinterpret_cast<void*>(HD_ReadFile));
+		// BP_TryFinishFileOp
+		// 40 57 48 83 ec 20 48 8b f9 e8 ?? ?? ?? ?? 84 c0
+		FinishHook = safetyhook::create_inline(reinterpret_cast<void*>(BPIsReadDone), reinterpret_cast<void*>(HD_TryFinishFileOp));
+	}
+#endif
 }
